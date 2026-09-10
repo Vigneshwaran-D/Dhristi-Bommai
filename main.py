@@ -8,7 +8,7 @@ from typing import Optional, Tuple, Dict, List
 
 import tkinter as tk
 from tkinter import Canvas, Menu
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageOps
 
 
 # Enable DPI awareness on Windows for razor-sharp rendering and accurate cursor tracking
@@ -27,13 +27,13 @@ if platform.system() == "Windows":
 class Config:
     charm_size: int = 130
     rope_nodes: int = 14              # Number of flexible rope segments
-    rope_length: int = 210
+    rope_length: int = 75
     gravity: float = 2400.0           # Screen gravity (px/s^2)
     damping: float = 0.988            # Velocity retention per frame
-    window_width: int = 520
+    window_width: int = 340
     window_height: int = 580
     target_fps: int = 60
-    margin_right: int = 220
+    margin_right: int = 70
     transparent_color: str = "#010101"
 
 
@@ -149,9 +149,10 @@ class CharmRenderer:
         self.canvas = canvas
         self.config = config
         self.assets_dir = assets_dir
-        self.current_asset_name = CHARM_CATALOG[0][0]
-        self.current_charm_label = CHARM_CATALOG[0][1]
+        self.current_asset_name = "nimbu-lemon.png"
+        self.current_charm_label = "Nimbu Mirchi (Lemon, Chilies & Coal)"
         self.visible = True
+        self.show_switcher_ui = False
 
         self.base_image: Optional[Image.Image] = None
         self.charm_width = self.config.charm_size
@@ -169,7 +170,9 @@ class CharmRenderer:
         self.knot_id: Optional[int] = None
         self.charm_id: Optional[int] = None
 
-        # Badge pill notification (displays briefly on key press)
+        # Canvas item IDs for interactive switcher UI
+        self.arrow_prev_id: Optional[int] = None
+        self.arrow_next_id: Optional[int] = None
         self.badge_bg_id: Optional[int] = None
         self.badge_text_id: Optional[int] = None
 
@@ -188,24 +191,65 @@ class CharmRenderer:
         self.current_charm_label = label
         self._rotated_cache.clear()
 
-        asset_path = self.assets_dir / asset_filename
-        if not asset_path.exists():
-            available = list(self.assets_dir.glob("*.png"))
-            if available:
-                asset_path = available[0]
-
         try:
-            raw_img = Image.open(asset_path)
-            raw_img.thumbnail(
-                (self.config.charm_size, self.config.charm_size),
-                Image.Resampling.LANCZOS,
-            )
+            if asset_filename == "nimbu-lemon.png":
+                raw_img = self.build_nimbu_mirchi()
+            else:
+                asset_path = self.assets_dir / asset_filename
+                if not asset_path.exists():
+                    available = list(self.assets_dir.glob("*.png"))
+                    if not available:
+                        raise FileNotFoundError(f"No PNG assets found in {self.assets_dir}")
+                    asset_path = available[0]
+                raw_img = Image.open(asset_path).convert("RGBA")
+                raw_img.thumbnail(
+                    (self.config.charm_size, self.config.charm_size),
+                    Image.Resampling.LANCZOS,
+                )
+
             self.base_image = self.sanitize_image(raw_img)
             self.charm_width, self.charm_height = self.base_image.size
         except Exception as e:
             print(f"Failed to load charm {asset_filename}: {e}")
             self.base_image = Image.new("RGBA", (self.config.charm_size, self.config.charm_size), (180, 40, 20, 255))
             self.charm_width, self.charm_height = self.base_image.size
+
+    def build_nimbu_mirchi(self) -> Image.Image:
+        chili_width = 220
+        chilies = []
+        for index in range(1, 8):
+            chili = Image.open(self.assets_dir / f"nimbu-chili-{index}.png").convert("RGBA")
+            scale = chili_width / chili.width
+            chilies.append(chili.resize(
+                (chili_width, round(chili.height * scale)),
+                Image.Resampling.LANCZOS,
+            ))
+
+        lemon = ImageOps.contain(
+            Image.open(self.assets_dir / "nimbu-lemon.png").convert("RGBA"),
+            (160, 180),
+            method=Image.Resampling.LANCZOS,
+        )
+        coal = ImageOps.contain(
+            Image.open(self.assets_dir / "nimbu-coal.png").convert("RGBA"),
+            (72, 72),
+            method=Image.Resampling.LANCZOS,
+        )
+
+        overlap = 10
+        chili_height = sum(chili.height for chili in chilies) - overlap * (len(chilies) - 1)
+        width = max(chili_width, lemon.width, coal.width)
+        height = chili_height + lemon.height + coal.height
+        composite = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+
+        y = 0
+        for chili in chilies:
+            composite.alpha_composite(chili, ((width - chili.width) // 2, y))
+            y += chili.height - overlap
+        composite.alpha_composite(lemon, ((width - lemon.width) // 2, y))
+        y += lemon.height
+        composite.alpha_composite(coal, ((width - coal.width) // 2, y))
+        return composite
 
     def get_rotated_frame(self, degrees: float) -> ImageTk.PhotoImage:
         deg_int = int(round(degrees))
@@ -216,12 +260,12 @@ class CharmRenderer:
         return self._rotated_cache[deg_clamped]
 
     def init_canvas_items(self):
-        # 1. Top ceiling slider plate
+        # 1. Top ceiling slider plate (Draggable handle to reposition anywhere across screen top)
         self.slider_plate_id = self.canvas.create_rectangle(
             0, 0, 0, 0, fill="#B8860B", outline="#FFD700", width=1.5, tags="slider"
         )
         self.slider_text_id = self.canvas.create_text(
-            0, 0, text="◄ SLIDE ►", fill="#FFFFFF", font=("Segoe UI", 7, "bold"), tags="slider"
+            0, 0, text="◄  ►", fill="#FFFFFF", font=("Segoe UI", 7, "bold"), tags="slider"
         )
         # 2. Suspension ring
         self.anchor_mount_id = self.canvas.create_oval(
@@ -242,26 +286,32 @@ class CharmRenderer:
                 0, 0, 0, 0, fill=bead_colors[i], outline="#3A1A0A", width=1.0, tags="bead"
             )
             self.bead_ids.append(bid)
-        # 5. Charm image (placed below knot)
-        self.charm_id = self.canvas.create_image(
-            0, 0, anchor=tk.CENTER, tags="charm"
-        )
-        # 6. Lower knot connector (drawn on top of the attachment point at the top edge of charm)
+        # 5. Lower knot connector
         self.knot_id = self.canvas.create_oval(
-            0, 0, 0, 0, fill="#8B1E0F", outline="#D4AF37", width=1.2, tags="knot"
+            0, 0, 0, 0, fill="#8B1E0F", outline="#4A1008", width=1.0, tags="knot"
+        )
+        # 6. Charm image
+            self.charm_id = self.canvas.create_image(
+                0, 0, anchor=tk.N, tags="charm"
         )
 
-        # 7. Notification Badge Pill
+        # 7. Interactive Switcher UI (Arrows and Badge)
+        self.arrow_prev_id = self.canvas.create_text(
+            0, 0, text="◀", fill="#FFD700", activefill="#FFFFFF", font=("Segoe UI", 13, "bold"), tags="ui_switcher"
+        )
+        self.arrow_next_id = self.canvas.create_text(
+            0, 0, text="▶", fill="#FFD700", activefill="#FFFFFF", font=("Segoe UI", 13, "bold"), tags="ui_switcher"
+        )
         self.badge_bg_id = self.canvas.create_rectangle(
-            0, 0, 0, 0, fill="#181818", outline="#D4AF37", width=1.0, tags="badge"
+            0, 0, 0, 0, fill="#181818", outline="#D4AF37", width=1.0, tags="ui_switcher"
         )
         self.badge_text_id = self.canvas.create_text(
-            0, 0, text="", fill="#FFD700", font=("Segoe UI", 8, "bold"), tags="badge"
+            0, 0, text="", fill="#FFD700", font=("Segoe UI", 8, "bold"), tags="ui_switcher"
         )
 
-        self.canvas.itemconfigure("badge", state="hidden")
+        self.canvas.itemconfigure("ui_switcher", state="hidden")
 
-    def draw(self, nodes: List[List[float]], angle: float, show_badge: bool = False, badge_label: str = ""):
+    def draw(self, nodes: List[List[float]], angle: float, show_ui: bool = False):
         if not self.visible:
             self.canvas.itemconfigure("all", state="hidden")
             return
@@ -269,9 +319,9 @@ class CharmRenderer:
         self.canvas.itemconfigure("all", state="normal")
 
         anchor_x, anchor_y = nodes[0][0], nodes[0][1]
-        attach_x, attach_y = nodes[-1][0], nodes[-1][1]  # The bottom tip of the rope
+        charm_x, charm_y = nodes[-1][0], nodes[-1][1]
 
-        # Top ceiling slider handle bracket
+        # 1. Draw top ceiling slider handle bracket
         plate_w = 34.0
         plate_h = 10.0
         self.canvas.coords(
@@ -289,7 +339,7 @@ class CharmRenderer:
             anchor_x + mount_r, anchor_y + mount_r * 2 + 2
         )
 
-        # Rope curved spline through all nodes (stops right at attach_x, attach_y)
+        # 2. Rope curved spline through all nodes
         rope_points = []
         for p in nodes:
             rope_points.extend([p[0], p[1]])
@@ -297,7 +347,7 @@ class CharmRenderer:
         self.canvas.coords(self.rope_outer_id, *rope_points)
         self.canvas.coords(self.rope_inner_id, *rope_points)
 
-        # Position beads along the flexible rope
+        # 3. Position beads on nodes along the flexible rope
         N = len(nodes)
         bead_indices = [max(1, int(N * 0.25)), max(2, int(N * 0.50)), max(3, int(N * 0.75))]
         for idx, node_idx in enumerate(bead_indices):
@@ -306,40 +356,42 @@ class CharmRenderer:
             br = 5.0 if idx != 1 else 6.0
             self.canvas.coords(self.bead_ids[idx], bx - br, by - br, bx + br, by + br)
 
-        # Rotate charm: positive angle = swing right, Pillow rotates CCW, so use +degrees
-        rotation_deg = math.degrees(angle)
+        # 4. Lower knot coordinates
+        kr = 5.0
+        self.canvas.coords(self.knot_id, charm_x - kr, charm_y - kr, charm_x + kr, charm_y + kr)
+
+        # 5. Rotate charm dynamically with bottom rope tangent angle
+        rotation_deg = -math.degrees(angle) * 0.85
         self.current_photo = self.get_rotated_frame(rotation_deg)
 
-        # ATTACHMENT TO TOP EDGE OF CHARM:
-        # Place charm center exactly half_h below the rope tip along the tangent direction.
-        # This ensures the charm's top pixel lands precisely at the rope bottom node.
-        half_h = self.charm_height * 0.5
-        charm_center_x = attach_x + half_h * math.sin(angle)
-        charm_center_y = attach_y + half_h * math.cos(angle)
-
-        self.canvas.coords(self.charm_id, int(round(charm_center_x)), int(round(charm_center_y)))
+        self.canvas.coords(self.charm_id, int(round(charm_x)), int(round(charm_y)))
         self.canvas.itemconfig(self.charm_id, image=self.current_photo)
 
-        # Lower knot connector sits right on top edge of the charm where rope attaches
-        kr = 5.0
-        self.canvas.coords(self.knot_id, attach_x - kr, attach_y - kr, attach_x + kr, attach_y + kr)
+        # 6. Interactive Switcher UI (Arrows and Name Badge)
+        if show_ui:
+            self.canvas.itemconfigure("ui_switcher", state="normal")
+            half_w = self.charm_width * 0.5 + 16.0
+            half_h = self.charm_height * 0.5 + 12.0
 
-        # Notification Badge (positioned cleanly below the charm body)
-        if show_badge and badge_label:
-            self.canvas.itemconfigure("badge", state="normal")
-            badge_y = charm_center_y + half_h + 14.0
-            badge_text = f"◄  {badge_label}  ►"
+            # Left and right arrow buttons
+            self.canvas.coords(self.arrow_prev_id, charm_x - half_w, charm_y)
+            self.canvas.coords(self.arrow_next_id, charm_x + half_w, charm_y)
+
+            # Name pill badge below charm
+            short_name = self.current_charm_label.split(" (")[0]
+            badge_text = f"◄  {short_name}  ►"
             self.canvas.itemconfig(self.badge_text_id, text=badge_text)
 
-            badge_half_w = min(130.0, len(badge_text) * 4.2 + 16.0)
+            badge_y = charm_y + half_h
+            badge_half_w = min(110.0, len(badge_text) * 4.2 + 16.0)
             self.canvas.coords(
                 self.badge_bg_id,
-                charm_center_x - badge_half_w, badge_y - 10,
-                charm_center_x + badge_half_w, badge_y + 10
+                charm_x - badge_half_w, badge_y - 9,
+                charm_x + badge_half_w, badge_y + 9
             )
-            self.canvas.coords(self.badge_text_id, charm_center_x, badge_y)
+            self.canvas.coords(self.badge_text_id, charm_x, badge_y)
         else:
-            self.canvas.itemconfigure("badge", state="hidden")
+            self.canvas.itemconfigure("ui_switcher", state="hidden")
 
     def set_visible(self, visible: bool):
         self.visible = visible
@@ -366,6 +418,8 @@ class FlexibleRopePhysics:
         self.drag_offset_y = 0.0
         self.mouse_vx = 0.0
         self.mouse_vy = 0.0
+        self.sleeping = False
+        self.settle_frames = 0
 
     def set_anchor(self, x: float, y: float):
         self.anchor_x = x
@@ -377,24 +431,16 @@ class FlexibleRopePhysics:
         self.prev = [[p[0], p[1]] for p in self.pos]
         self.dragging = False
         self.drag_node = -1
+        self.sleeping = True
+        self.settle_frames = 0
 
-    def get_attachment_point(self) -> Tuple[float, float]:
-        """Returns the bottom tip of the rope where the charm attaches."""
+    def get_charm_position(self) -> Tuple[float, float]:
         return self.pos[-1][0], self.pos[-1][1]
 
     def get_bottom_tangent_angle(self) -> float:
         dx = self.pos[-1][0] - self.pos[-2][0]
         dy = self.pos[-1][1] - self.pos[-2][1]
         return math.atan2(dx, max(1e-3, dy))
-
-    def get_charm_center(self, charm_height: float) -> Tuple[float, float]:
-        """Returns the visual center of the charm hanging below the rope tip."""
-        ax, ay = self.get_attachment_point()
-        angle = self.get_bottom_tangent_angle()
-        half_h = charm_height * 0.5
-        cx = ax + half_h * math.sin(angle)
-        cy = ay + half_h * math.cos(angle)
-        return cx, cy
 
     def get_closest_node(self, px: float, py: float) -> Tuple[int, float]:
         min_dist = float("inf")
@@ -424,9 +470,14 @@ class FlexibleRopePhysics:
                 min_d = d
         return min_d
 
-    def apply_hover_bend(self, mouse_x: float, mouse_y: float, vx: float, vy: float, dt: float, charm_height: float):
+    def apply_hover_bend(self, mouse_x: float, mouse_y: float, vx: float, vy: float, dt: float):
         if self.dragging:
             return
+
+        # A stationary cursor must not act like a continuous force.
+        if math.hypot(vx, vy) < 20.0:
+            return
+        self.sleeping = False
 
         # 1. Bend rope nodes around cursor
         cursor_r = 26.0
@@ -441,14 +492,14 @@ class FlexibleRopePhysics:
                 if abs(vx) > 15.0:
                     self.pos[i][0] += vx * dt * 0.45
 
-        # 2. Deflect charm if cursor touches or sweeps the charm body
-        charm_cx, charm_cy = self.get_charm_center(charm_height)
-        dist_charm = math.hypot(mouse_x - charm_cx, mouse_y - charm_cy)
-        charm_r = self.config.charm_size * 0.52
+        # 2. Deflect charm if cursor touches or sweeps it
+        charm_x, charm_y = self.get_charm_position()
+        dist_charm = math.hypot(mouse_x - charm_x, mouse_y - charm_y)
+        charm_r = self.config.charm_size * 0.5
 
         if dist_charm < charm_r:
-            dx = charm_cx - mouse_x
-            dy = charm_cy - mouse_y
+            dx = charm_x - mouse_x
+            dy = charm_y - mouse_y
             penetration = (charm_r - dist_charm) / charm_r
             if abs(vx) > 15.0:
                 nudge_x = 1.0 if vx > 0 else -1.0
@@ -461,6 +512,9 @@ class FlexibleRopePhysics:
                 self.pos[-1][0] += vx * dt * 0.65
 
     def update_physics(self, dt: float):
+        if self.sleeping and not self.dragging:
+            return
+
         gravity = self.config.gravity
         damping = self.config.damping
 
@@ -512,23 +566,45 @@ class FlexibleRopePhysics:
                             p2[0] -= dx * err * 0.50
                             p2[1] -= dy * err * 0.50
 
-    def start_drag(self, mouse_x: float, mouse_y: float, charm_height: float):
-        charm_cx, charm_cy = self.get_charm_center(charm_height)
-        dist_charm = math.hypot(mouse_x - charm_cx, mouse_y - charm_cy)
+        if not self.dragging:
+            max_speed = 0.0
+            max_horizontal_offset = 0.0
+            for i in range(1, self.N):
+                vx = (self.pos[i][0] - self.prev[i][0]) / max(dt, 1e-3)
+                vy = (self.pos[i][1] - self.prev[i][1]) / max(dt, 1e-3)
+                max_speed = max(max_speed, math.hypot(vx, vy))
+                expected_x = self.anchor_x
+                max_horizontal_offset = max(
+                    max_horizontal_offset,
+                    abs(self.pos[i][0] - expected_x),
+                )
+
+            if max_speed < 3.0 and max_horizontal_offset < 2.0:
+                self.settle_frames += 1
+            else:
+                self.settle_frames = 0
+
+            if self.settle_frames >= 8:
+                self.pos = [[self.anchor_x, self.anchor_y + i * self.seg_len] for i in range(self.N)]
+                self.prev = [[p[0], p[1]] for p in self.pos]
+                self.sleeping = True
+
+    def start_drag(self, mouse_x: float, mouse_y: float):
+        self.sleeping = False
+        self.settle_frames = 0
+        charm_x, charm_y = self.get_charm_position()
+        dist_charm = math.hypot(mouse_x - charm_x, mouse_y - charm_y)
         charm_r = self.config.charm_size * 0.55
 
         if dist_charm <= charm_r:
             self.drag_node = self.N - 1
-            # Offset from the attachment point
-            self.drag_offset_x = mouse_x - self.pos[-1][0]
-            self.drag_offset_y = mouse_y - self.pos[-1][1]
         else:
             closest_idx, _ = self.get_closest_node(mouse_x, mouse_y)
             self.drag_node = closest_idx
-            self.drag_offset_x = mouse_x - self.pos[self.drag_node][0]
-            self.drag_offset_y = mouse_y - self.pos[self.drag_node][1]
 
         self.dragging = True
+        self.drag_offset_x = mouse_x - self.pos[self.drag_node][0]
+        self.drag_offset_y = mouse_y - self.pos[self.drag_node][1]
         self.mouse_vx = 0.0
         self.mouse_vy = 0.0
 
@@ -564,6 +640,8 @@ class FlexibleRopePhysics:
         self.drag_node = -1
 
     def apply_impulse(self, impulse: float):
+        self.sleeping = False
+        self.settle_frames = 0
         for i in range(1, self.N):
             weight = (i / self.N)
             self.pos[i][0] += impulse * weight * 12.0
@@ -596,17 +674,16 @@ class DesktopDangleApp:
         self.anchor_y = 4.0
         self.physics.set_anchor(self.anchor_x, self.anchor_y)
 
-        self.current_charm_idx = 0
-        self.badge_expire_time = 0.0
-
-        # OS-level key state tracking for Left and Right Arrow hotkeys
-        self.last_vk_left = False
-        self.last_vk_right = False
+        self.current_charm_idx = next(
+            index for index, (filename, _) in enumerate(CHARM_CATALOG)
+            if filename == "nimbu-lemon.png"
+        )
 
         # Repositioning state (Slide anywhere on screen top)
         self.sliding_window = False
         self.slide_start_cursor_x = 0
         self.slide_start_win_x = 0
+        self.last_win_x = self.root.winfo_x()
 
         self.setup_menu()
         self.setup_bindings()
@@ -630,7 +707,7 @@ class DesktopDangleApp:
                 label=f"{prefix}{label}{shortcut}",
                 command=lambda i=idx: self.select_charm_by_index(i)
             )
-        self.context_menu.add_cascade(label="Select Charm (or Left/Right Arrow)", menu=charm_menu)
+        self.context_menu.add_cascade(label="Select Charm", menu=charm_menu)
 
         # 2. Preset Reposition Menu (Screen Top Only)
         pos_menu = Menu(self.context_menu, tearoff=0)
@@ -649,17 +726,12 @@ class DesktopDangleApp:
     def setup_bindings(self):
         self.canvas.bind("<Button-1>", self.on_mouse_down)
         self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
-        self.canvas.bind("<Button-2>", self.on_middle_mouse_down)
+        self.canvas.bind("<Button-2>", self.on_middle_mouse_down)  # Middle click to slide
         self.canvas.bind("<Button-3>", self.show_context_menu)
+        self.canvas.bind("<Double-Button-1>", self.on_double_click)
         self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
 
-        # Left and Right arrow keys for instant charm switching
-        self.root.bind("<Left>", lambda e: self.cycle_charm(-1))
-        self.root.bind("<Right>", lambda e: self.cycle_charm(1))
-        self.root.bind("<Key-Left>", lambda e: self.cycle_charm(-1))
-        self.root.bind("<Key-Right>", lambda e: self.cycle_charm(1))
-
-        # Other Hotkeys
+        # Hotkeys
         self.root.bind("<Key-h>", self.toggle_visibility)
         self.root.bind("<Key-H>", self.toggle_visibility)
         self.root.bind("<Key-r>", self.reset_position)
@@ -673,7 +745,7 @@ class DesktopDangleApp:
         self.root.bind("<bracketright>", lambda e: self.cycle_charm(1))
         self.root.bind("<bracketleft>", lambda e: self.cycle_charm(-1))
 
-        # Shift + Arrow keys to nudge window position on screen top
+        # Arrow keys to nudge window position on screen top
         self.root.bind("<Shift-Left>", lambda e: self.nudge_window(-35))
         self.root.bind("<Shift-Right>", lambda e: self.nudge_window(35))
 
@@ -685,7 +757,6 @@ class DesktopDangleApp:
         self.current_charm_idx = idx % len(CHARM_CATALOG)
         filename, label = CHARM_CATALOG[self.current_charm_idx]
         self.renderer.load_charm(filename, label)
-        self.badge_expire_time = time.time() + 1.8
         self.setup_menu()
 
     def cycle_charm(self, delta: int):
@@ -697,29 +768,56 @@ class DesktopDangleApp:
         else:
             self.cycle_charm(1)
 
+    def on_double_click(self, event):
+        charm_x, charm_y = self.physics.get_charm_position()
+        dist = math.hypot(event.x - charm_x, event.y - charm_y)
+        if dist <= self.config.charm_size * 0.6:
+            self.cycle_charm(1)
+
     def is_in_top_bracket(self, local_x: float, local_y: float) -> bool:
         return (0 <= local_y <= 24.0) and (abs(local_x - self.anchor_x) <= 38.0)
 
     def is_in_interactive_zone(self, local_x: float, local_y: float) -> bool:
         if self.is_in_top_bracket(local_x, local_y):
             return True
-        charm_cx, charm_cy = self.physics.get_charm_center(self.renderer.charm_height)
-        dist_charm = math.hypot(local_x - charm_cx, local_y - charm_cy)
+        charm_x, charm_y = self.physics.get_charm_position()
+        dist_charm = math.hypot(local_x - charm_x, local_y - charm_y)
         dist_rope = self.physics.get_rope_distance(local_x, local_y)
+        if self.renderer.current_asset_name == "nimbu-lemon.png":
+            object_left = charm_x - self.renderer.charm_width / 2
+            object_right = charm_x + self.renderer.charm_width / 2
+            object_bottom = charm_y + self.renderer.charm_height
+            if object_left <= local_x <= object_right and charm_y <= local_y <= object_bottom:
+                return True
         charm_radius = self.config.charm_size * 0.55
         return (dist_charm <= charm_radius + 36.0) or (dist_rope <= 26.0)
 
     def on_mouse_down(self, event):
-        self.root.focus_set()
-
-        # 1. Top ceiling mount slider plate
+        # 1. Check if user clicked on the top ceiling mount slider plate
         if self.is_in_top_bracket(event.x, event.y) or (event.state & 0x0001):
             self.start_sliding_window()
             return
 
-        # 2. Normal rope / charm drag
+        # 2. Check if user clicked the interactive switcher UI (arrows or badge)
+        charm_x, charm_y = self.physics.get_charm_position()
+        half_w = self.renderer.charm_width * 0.5 + 16.0
+        half_h = self.renderer.charm_height * 0.5 + 12.0
+
+        if math.hypot(event.x - (charm_x - half_w), event.y - charm_y) <= 20.0:
+            self.cycle_charm(-1)
+            return
+
+        if math.hypot(event.x - (charm_x + half_w), event.y - charm_y) <= 20.0:
+            self.cycle_charm(1)
+            return
+
+        if abs(event.x - charm_x) <= 90.0 and abs(event.y - (charm_y + half_h)) <= 14.0:
+            self.cycle_charm(1)
+            return
+
+        # 3. Normal rope / charm drag
         if self.is_in_interactive_zone(event.x, event.y):
-            self.physics.start_drag(event.x, event.y, self.renderer.charm_height)
+            self.physics.start_drag(event.x, event.y)
             self.platform.set_clickthrough(False)
 
     def on_middle_mouse_down(self, event):
@@ -790,31 +888,6 @@ class DesktopDangleApp:
         except Exception:
             pass
 
-    def check_arrow_hotkeys(self, cursor_in_window: bool):
-        if not self.platform.is_windows:
-            return
-
-        is_focused = (self.root.focus_get() is not None)
-        if not (cursor_in_window or is_focused):
-            self.last_vk_left = False
-            self.last_vk_right = False
-            return
-
-        try:
-            import ctypes
-            left_down = (ctypes.windll.user32.GetAsyncKeyState(0x25) & 0x8000) != 0
-            right_down = (ctypes.windll.user32.GetAsyncKeyState(0x27) & 0x8000) != 0
-
-            if left_down and not self.last_vk_left:
-                self.cycle_charm(-1)
-            if right_down and not self.last_vk_right:
-                self.cycle_charm(1)
-
-            self.last_vk_left = left_down
-            self.last_vk_right = right_down
-        except Exception:
-            pass
-
     def update_loop(self):
         if not self.running:
             return
@@ -834,11 +907,6 @@ class DesktopDangleApp:
         cursor_vy = (local_y - self.last_cursor_y) / dt
         self.last_cursor_x = local_x
         self.last_cursor_y = local_y
-
-        cursor_in_window = (0 <= local_x <= self.config.window_width and 0 <= local_y <= self.config.window_height)
-
-        # Check Left and Right arrow hotkeys
-        self.check_arrow_hotkeys(cursor_in_window)
 
         # Handle window reposition sliding along screen top
         if self.sliding_window:
@@ -866,6 +934,7 @@ class DesktopDangleApp:
         elif not self.sliding_window:
             self.canvas.config(cursor="")
 
+        cursor_in_window = (0 <= local_x <= self.config.window_width and 0 <= local_y <= self.config.window_height)
         in_interactive_zone = (
             self.sliding_window
             or self.physics.dragging
@@ -880,16 +949,16 @@ class DesktopDangleApp:
         if self.physics.dragging:
             self.physics.update_drag(local_x, local_y, cursor_vx, cursor_vy)
         elif cursor_in_window and not self.sliding_window:
-            self.physics.apply_hover_bend(local_x, local_y, cursor_vx, cursor_vy, dt, self.renderer.charm_height)
+            self.physics.apply_hover_bend(local_x, local_y, cursor_vx, cursor_vy, dt)
 
         self.physics.update_physics(dt)
 
-        show_badge = (time.time() < self.badge_expire_time)
-        short_name = self.renderer.current_charm_label.split(" (")[0]
-        badge_label = f"{short_name} [{self.current_charm_idx + 1}/{len(CHARM_CATALOG)}]"
+        charm_x, charm_y = self.physics.get_charm_position()
+        dist_charm = math.hypot(local_x - charm_x, local_y - charm_y)
+        show_ui = cursor_in_window and (dist_charm <= self.config.charm_size * 0.75) and not self.physics.dragging
 
         angle = self.physics.get_bottom_tangent_angle()
-        self.renderer.draw(self.physics.pos, angle, show_badge=show_badge, badge_label=badge_label)
+        self.renderer.draw(self.physics.pos, angle, show_ui=show_ui)
 
         frame_delay = int(1000 / self.config.target_fps)
         elapsed_ms = int((time.time() - current_time) * 1000)
